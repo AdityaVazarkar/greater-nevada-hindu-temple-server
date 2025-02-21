@@ -6,6 +6,9 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 import Stripe from "stripe";
+import multer from "multer";
+import path from "path";
+import fs from "fs";
 
 dotenv.config();
 
@@ -26,7 +29,17 @@ const pool = mysql.createPool({
   queueLimit: 0,
 });
 
-app.use(cors());
+app.options("*", cors()); // Handle preflight requests
+
+app.use(
+  cors({
+    origin: ["http://localhost:5173"], // Add all frontend URLs
+    methods: "GET,POST,PUT,DELETE,OPTIONS",
+    allowedHeaders: "Content-Type,Authorization",
+    credentials: true,
+  })
+);
+
 app.use(express.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
@@ -75,7 +88,45 @@ const ensureTablesExist = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS directors (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        position VARCHAR(255) NOT NULL,
+        image VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS subscribers (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS pledges (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        salutation VARCHAR(10),
+        firstName VARCHAR(255) NOT NULL,
+        lastName VARCHAR(255) NOT NULL,
+        email VARCHAR(255) NOT NULL,
+        phone VARCHAR(50) NOT NULL,
+        address1 TEXT NOT NULL,
+        address2 TEXT,
+        city VARCHAR(100) NOT NULL,
+        state VARCHAR(50) NOT NULL,
+        zip VARCHAR(20) NOT NULL,
+        country VARCHAR(100) NOT NULL,
+        pledgeType VARCHAR(50) NOT NULL,
+        amount DECIMAL(10,2) NOT NULL,
+        anonymity VARCHAR(50),
+        pledgeDate DATE NOT NULL,
+        fulfillDate DATE NOT NULL,
+        signature TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
     console.log("✅ Tables ensured");
   } catch (error) {
     console.error("Error ensuring tables exist:", error);
@@ -83,6 +134,44 @@ const ensureTablesExist = async () => {
     connection.release();
   }
 };
+
+const __dirname = path.resolve(); // This will give the correct base directory
+
+// Ensure the uploads directory exists
+const uploadsDir = path.join(__dirname, "uploads");
+
+// Create uploads directory if it doesn't exist
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  console.log("Uploads directory created.");
+} else {
+  console.log("Uploads directory already exists.");
+}
+// Multer storage configuration
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, "uploads/"); // The folder where images are stored
+  },
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + "-" + file.originalname); // Renaming the file
+  },
+});
+
+const upload = multer({ storage: storage });
+
+app.post("/upload", (req, res) => {
+  const upload = multer({ dest: "uploads/" });
+  upload.single("image")(req, res, (err) => {
+    if (err) {
+      return res.status(400).send(err);
+    }
+    res.send({ image: req.file.filename });
+  });
+});
+
+// In your backend, if using Express, use something like:
+
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // 🔹 Ensure Owner User Exists
 const ensureOwnerExists = async () => {
@@ -108,7 +197,7 @@ const ensureOwnerExists = async () => {
 };
 
 // 🔹 Middleware for JWT Authentication
-const authenticateJWT = (req, res, next) => {
+let authenticateJWT = (req, res, next) => {
   const token = req.headers.authorization;
   if (token) {
     const tokenWithoutBearer = token.split(" ")[1];
@@ -321,9 +410,259 @@ app.post("/contact-us", async (req, res) => {
   }
 });
 
+app.post(
+  "/add-director",
+  authenticateJWT,
+  isOwner,
+  upload.single("image"),
+  async (req, res) => {
+    const { name, position } = req.body;
+    const image = req.file ? req.file.path : null;
+    if (!name || !position || !image) {
+      return res.status(400).json({ error: "All fields are required" });
+    }
+    try {
+      const connection = await pool.getConnection();
+      await connection.query(
+        "INSERT INTO directors (name, position, image) VALUES (?, ?, ?)",
+        [name, position, image]
+      );
+      connection.release();
+      res.status(201).json({ message: "Director added successfully" });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+app.get("/directors", async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    const [directors] = await connection.query("SELECT * FROM directors");
+    console.log(directors); // Debugging
+    connection.release();
+    res.json(directors);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete(
+  "/delete-director/:id",
+  authenticateJWT,
+  isOwner,
+  async (req, res) => {
+    try {
+      const connection = await pool.getConnection();
+      await connection.query("DELETE FROM directors WHERE id = ?", [
+        req.params.id,
+      ]);
+      connection.release();
+      res.json({ message: "Director deleted successfully" });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+app.post("/pledge", async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    await connection.query("INSERT INTO pledges SET ?", req.body);
+    connection.release();
+    res.status(201).json({ message: "Pledge submitted successfully!" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/pledges", async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    const [pledges] = await connection.query("SELECT * FROM pledges");
+    connection.release();
+    res.json(pledges);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/pledges/:id", async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    await connection.query("DELETE FROM pledges WHERE id = ?", [req.params.id]);
+    connection.release();
+    res.status(200).json({ message: "Pledge deleted successfully!" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/subscribe", async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ message: "Email is required" });
+    const connection = await pool.getConnection();
+    const [existing] = await connection.query(
+      "SELECT * FROM subscribers WHERE email = ?",
+      [email]
+    );
+    if (existing.length > 0) {
+      connection.release();
+      return res.status(400).json({ message: "Email is already subscribed!" });
+    }
+    await connection.query("INSERT INTO subscribers (email) VALUES (?)", [
+      email,
+    ]);
+    connection.release();
+    res.status(201).json({ message: "Subscription successful!" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/subscribers", async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    const [subscribers] = await connection.query("SELECT * FROM subscribers");
+    connection.release();
+    res.json(subscribers);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/unsubscribe/:email", async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    await connection.query("DELETE FROM subscribers WHERE email = ?", [
+      req.params.email,
+    ]);
+    connection.release();
+    res.status(200).json({ message: "Unsubscribed successfully!" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 🔹 Start Server
 app.listen(PORT, async () => {
   console.log(`🚀 Server is running on http://localhost:${PORT}`);
   await ensureTablesExist();
   await ensureOwnerExists();
 });
+
+// app.post(
+//   "/add-director",
+//   authenticateJWT,
+//   isOwner,
+//   upload.single("image"),
+//   async (req, res) => {
+//     const { name, position } = req.body;
+//     const image = req.file ? req.file.path : null;
+
+//     if (!name || !position || !image) {
+//       return res
+//         .status(400)
+//         .send({ error: "All fields are required, including the image" });
+//     }
+
+//     try {
+//       const connection = await pool.getConnection();
+//       await connection.query(
+//         "INSERT INTO directors (name, position, image) VALUES (?, ?, ?)",
+//         [name, position, image]
+//       );
+//       connection.release();
+//       res.status(201).send({ message: "Director added successfully" });
+//     } catch (error) {
+//       console.error("Error adding director:", error);
+//       res.status(500).send({ error: error.message });
+//     }
+//   }
+// );
+
+// // Get Directors (Public Access)
+// app.get("/directors", async (req, res) => {
+//   const connection = await pool.getConnection();
+//   try {
+//     const [directors] = await connection.query("SELECT * FROM directors");
+//     connection.release();
+//     res.send(directors);
+//   } catch (error) {
+//     console.error("Error getting directors:", error);
+//     res.status(500).send({ error: error.message });
+//   }
+// });
+
+// // Update Director (Only for Owner)
+// app.put(
+//   "/edit-director/:id",
+//   authenticateJWT,
+//   isOwner,
+//   upload.single("image"),
+//   async (req, res) => {
+//     const { name, position } = req.body;
+//     const image = req.file ? req.file.path : null;
+
+//     const directorId = req.params.id;
+
+//     try {
+//       const connection = await pool.getConnection();
+//       const [director] = await connection.query(
+//         "SELECT * FROM directors WHERE id = ?",
+//         [directorId]
+//       );
+
+//       if (director.length === 0) {
+//         return res.status(404).send({ error: "Director not found" });
+//       }
+
+//       await connection.query(
+//         "UPDATE directors SET name = ?, position = ?, image = ? WHERE id = ?",
+//         [
+//           name || director[0].name,
+//           position || director[0].position,
+//           image || director[0].image,
+//           directorId,
+//         ]
+//       );
+//       connection.release();
+//       res.send({ message: "Director updated successfully" });
+//     } catch (error) {
+//       console.error("Error updating director:", error);
+//       res.status(500).send({ error: error.message });
+//     }
+//   }
+// );
+
+// // Delete Director (Only for Owner)
+// app.delete(
+//   "/delete-director/:id",
+//   authenticateJWT,
+//   isOwner,
+//   async (req, res) => {
+//     const directorId = req.params.id;
+
+//     try {
+//       const connection = await pool.getConnection();
+//       const [director] = await connection.query(
+//         "SELECT * FROM directors WHERE id = ?",
+//         [directorId]
+//       );
+
+//       if (director.length === 0) {
+//         return res.status(404).send({ error: "Director not found" });
+//       }
+
+//       await connection.query("DELETE FROM directors WHERE id = ?", [
+//         directorId,
+//       ]);
+//       connection.release();
+//       res.send({ message: "Director deleted successfully" });
+//     } catch (error) {
+//       console.error("Error deleting director:", error);
+//       res.status(500).send({ error: error.message });
+//     }
+//   }
+// );
